@@ -4,3 +4,8 @@
 /speedtest-cli.py
 /log/connection.log
 /log/.DS_Store
+*.log
+*.bak
+*.draft
+*.tmp
+*.temp

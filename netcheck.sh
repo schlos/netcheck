@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 ################################################################################
 ##               Netcheck - Simple internet connection logging                ##
@@ -11,8 +11,10 @@ VAR_SCRIPTLOC="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )
 VAR_CONNECTED=true
 VAR_LOGFILE=log/connection.log
 VAR_SPEEDTEST_DISABLED=false
-VAR_CHECK_TIME=5
-VAR_HOST=http://www.google.com
+VAR_CHECK_TIME=60
+VAR_CONNECTIVIY_DETECTION=http://www.gstatic.com/generate_204
+VAR_EXPECTED_HTTP_CODE="204"
+VAR_HOST=${VAR_CONNECTIVIY_DETECTION}
 VAR_ENABLE_WEBINTERFACE=false
 VAR_ENABLE_ALWAYS_SPEEDTEST=false
 VAR_WEB_PORT=9000
@@ -124,6 +126,7 @@ PRINT_DURATION() {
   echo "$STRING_3 $(($VAR_DURATION / 60)) minutes and $(($VAR_DURATION % 60)) seconds." | tee -a $VAR_LOGFILE
   echo "$STRING_4" | tee -a $VAR_LOGFILE
 }
+
 PRINT_LOGGING_TERMINATED() {
   echo
   echo "************ Monitoring ended at:   $(date "+%a %d %b %Y %H:%M:%S %Z") ************" >> $VAR_LOGFILE
@@ -180,6 +183,9 @@ CHECK_FOR_SPEEDTEST() {
     if [ -f "$VAR_SCRIPTLOC/speedtest-cli.py" ] || [ -f "$VAR_SCRIPTLOC/speedtest-cli" ]; then
         echo -e "SpeedTest-CLI:    $COLOR_GREEN Installed $COLOR_RESET"
         VAR_SPEEDTEST_READY=true
+    elif command -v speedtest >/dev/null 2>&1; then
+        echo -e "Speedtest-CLI by Ookla:    $COLOR_GREEN Installed $COLOR_RESET"
+        VAR_SPEEDTEST_CLI_READY=true
     else
         echo -e "SpeedTest-CLI:    $COLOR_RED Not Installed $COLOR_RESET"
         INSTALL_SPEEDTEST
@@ -210,14 +216,83 @@ RUN_SPEEDTEST() {
   $VAR_SCRIPTLOC/speedtest-cli.py --simple --secure | sed 's/^/                                                 /' | tee -a $VAR_LOGFILE
 }
 
+RUN_SPEEDTEST_CLI() {
+  local attempts=10
+  local speedtest_output
+  local retry_delay=4  # Delay in seconds
+
+  echo "Starting speed test..."
+
+  # Loop to run speedtest multiple times or until download speed is obtained
+  while [[ $attempts -gt 0 ]]; do
+    speedtest_output="$(speedtest -f json-pretty)"
+
+    # Check if speedtest output contains download speed
+    if echo "$speedtest_output" | jq -e '.download' >/dev/null 2>&1; then
+      break
+    fi
+
+    ((attempts--))
+    sleep $retry_delay  # Add delay between retries
+  done
+
+  # If speed test was successful (check for download data)
+  if echo "$speedtest_output" | jq -e '.download' >/dev/null 2>&1; then
+    # Extract raw values from JSON
+    download_bandwidth=$(echo "$speedtest_output" | jq '.download.bandwidth')
+    upload_bandwidth=$(echo "$speedtest_output" | jq '.upload.bandwidth')
+    latency=$(echo "$speedtest_output" | jq '.ping.latency')
+    packet_loss=$(echo "$speedtest_output" | jq '.packetLoss')
+    server_name=$(echo "$speedtest_output" | jq -r '.server.name')
+    server_location=$(echo "$speedtest_output" | jq -r '.server.location')
+    server_country=$(echo "$speedtest_output" | jq -r '.server.country')
+    server_ip=$(echo "$speedtest_output" | jq -r '.server.ip')
+    isp=$(echo "$speedtest_output" | jq -r '.isp')
+    interface_name=$(echo "$speedtest_output" | jq -r '.interface.name')
+    is_vpn=$(echo "$speedtest_output" | jq -r '.interface.isVpn')
+    external_ip=$(echo "$speedtest_output" | jq -r '.interface.externalIp')
+    result_url=$(echo "$speedtest_output" | jq -r '.result.url')
+    jitter=$(echo "$speedtest_output" | jq '.ping.jitter')
+
+    # Convert bandwidth (bytes/sec to Mbps)
+    download=$(awk "BEGIN {printf \"%.2f Mbps\", $download_bandwidth * 8 / 1000000}")
+    upload=$(awk "BEGIN {printf \"%.2f Mbps\", $upload_bandwidth * 8 / 1000000}")
+    # Format latency, jitter, packet loss
+    latency_fmt=$(awk "BEGIN {printf \"%.2f ms\", $latency}")
+    jitter_fmt=$(awk "BEGIN {printf \"%.2f ms\", $jitter}")
+    packet_loss_fmt=$(awk "BEGIN {printf \"%.1f%%\", $packet_loss}")
+
+    echo "Download: $download" | tee -a "$VAR_LOGFILE"
+    echo "Upload: $upload" | tee -a "$VAR_LOGFILE"
+    echo "Latency: $latency_fmt" | tee -a "$VAR_LOGFILE"
+    echo "Packet Loss: $packet_loss_fmt" | tee -a "$VAR_LOGFILE"
+
+    # Log additional fields
+    echo "" | tee -a "$VAR_LOGFILE"
+    echo "Server: $server_name, $server_location, $server_country" | tee -a "$VAR_LOGFILE"
+    echo "ISP: $isp" | tee -a "$VAR_LOGFILE"
+    echo "External IP: $external_ip (VPN: $is_vpn)" | tee -a "$VAR_LOGFILE"
+    echo "Jitter: $jitter_fmt" | tee -a "$VAR_LOGFILE"
+    echo "Result URL: $result_url" | tee -a "$VAR_LOGFILE"
+  else
+    echo "Failed to obtain download speed" | tee -a "$VAR_LOGFILE"
+  fi
+}
+
 NET_CHECK() {
   while true; do
     # Check for network connection
-    nohup wget -q --tries=5 --timeout=20 -O - $VAR_HOST > /dev/null 2>&1
-    if [[ $? -eq 0 ]]; then :
+    CONNECTIVIY_RESULT=$(curl -m 20 --retry 5 -s -w "%{http_code}" $VAR_HOST)
+    if [ ${CONNECTIVIY_RESULT} = ${VAR_EXPECTED_HTTP_CODE} ]; then
       if [ $VAR_ENABLE_ALWAYS_SPEEDTEST = true ] && [ $VAR_CONNECTED = true ]; then :
         echo "$STRING_5" | tee -a $VAR_LOGFILE
-        RUN_SPEEDTEST
+        if [[ $VAR_SPEEDTEST_READY = true ]]; then :
+          RUN_SPEEDTEST
+        elif [[ $VAR_SPEEDTEST_CLI_READY = true ]]; then :
+          RUN_SPEEDTEST_CLI
+        else
+          echo "Didn't run Speedtest-CLI!"
+        fi
         PRINT_HR | tee -a $VAR_LOGFILE
       fi
       # We are currently online
@@ -229,6 +304,9 @@ NET_CHECK() {
         if [[ $VAR_SPEEDTEST_READY = true ]]; then :
           PRINT_HR | tee -a $VAR_LOGFILE
           RUN_SPEEDTEST
+        elif [[ $VAR_SPEEDTEST_CLI_READY = true ]]; then :
+          PRINT_HR | tee -a $VAR_LOGFILE
+          RUN_SPEEDTEST_CLI
         fi
         PRINT_HR | tee -a $VAR_LOGFILE
         SECONDS=0
@@ -254,7 +332,7 @@ NET_CHECK() {
 
 }
 
-INSTALL_AS_SERVICE() {
+INSTALL_AS_SERVICE_SYSTEMD() {
   if ! command -v systemctl &> /dev/null; then
     echo "Systemctl not found."
     echo "Netcheck can only be installed as a service on systems using systemctl."
@@ -293,6 +371,90 @@ EOL
       fi
     fi
   fi
+}
+
+INSTALL_AS_SERVICE_LAUNCHD() {
+  if [[ "$(uname)" != "Darwin" ]]; then
+    echo "This function is only for macOS (Darwin)."
+    return 1
+  fi
+
+  LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
+  LABEL="com.netcheck.service"
+  PLIST_PATH="$LAUNCH_AGENT_DIR/${LABEL}.plist"
+
+  mkdir -p "$LAUNCH_AGENT_DIR"
+
+  if [ -f "$PLIST_PATH" ]; then
+    echo "Netcheck is already installed as a launchd service."
+    echo "To manage it: launchctl unload/load $PLIST_PATH"
+    return 0
+  fi
+
+  echo "Creating launchd service for Netcheck at: $PLIST_PATH"
+
+  cat > "$PLIST_PATH" <<EOL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" 
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>${LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>${VAR_SCRIPTLOC}/${VAR_SCRIPTNAME}</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>${VAR_SCRIPTLOC}</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+  </dict>
+</plist>
+EOL
+
+  echo "Loading Netcheck launchd service..."
+  launchctl load "$PLIST_PATH"
+
+  PRINT_HR
+  echo "✅ Netcheck has been installed as a macOS launch agent."
+  echo "To start it manually:  launchctl start $LABEL"
+  echo "To stop it:            launchctl stop $LABEL"
+  echo "To remove it:          launchctl unload $PLIST_PATH && rm $PLIST_PATH"
+  echo "To check service:      launchctl list | grep $LABEL"
+  PRINT_HR
+  exit
+}
+
+UNINSTALL_SERVICE_LAUNCHD() {
+  if [[ "$(uname)" != "Darwin" ]]; then
+    echo "This function is only supported on macOS."
+    return 1
+  fi
+
+  local LABEL="com.netcheck.service"
+  local PLIST_PATH="$HOME/Library/LaunchAgents/${LABEL}.plist"
+
+  if [ ! -f "$PLIST_PATH" ]; then
+    echo "⚠️  No launchd service found for Netcheck at:"
+    echo "   $PLIST_PATH"
+    return 1
+  fi
+
+  echo "Unloading Netcheck launchd service..."
+  launchctl unload "$PLIST_PATH"
+
+  echo "Removing service plist file..."
+  rm -f "$PLIST_PATH"
+
+  echo "🧹 Cleanup complete."
+  echo "❌ Netcheck has been removed from launchd."
 }
 
 CLEANUP() {
@@ -368,7 +530,19 @@ while getopts "f:d:r:t:c:u:p:whelp-sie" opt; do
 done
 
 if [[ $VAR_INSTALL_AS_SERVICE = true ]]; then :
-  INSTALL_AS_SERVICE
+  case "$(uname)" in
+  "Linux")
+    if command -v systemctl &>/dev/null; then
+      INSTALL_AS_SERVICE_SYSTEMD
+    fi
+    ;;
+  "Darwin")
+    INSTALL_AS_SERVICE_LAUNCHD
+    ;;
+  *)
+    echo "Unsupported OS"
+    ;;
+  esac
 fi
 PRINT_HR
 SETUP_WEBSERVER
@@ -378,6 +552,10 @@ PRINT_LOGSTART
 if [[ $VAR_SPEEDTEST_READY = true ]]; then :
   echo "$STRING_5" | tee -a $VAR_LOGFILE
   RUN_SPEEDTEST
+  PRINT_HR | tee -a $VAR_LOGFILE
+elif [[ $VAR_SPEEDTEST_CLI_READY = true ]]; then :
+  echo "$STRING_5" | tee -a $VAR_LOGFILE
+  RUN_SPEEDTEST_CLI
   PRINT_HR | tee -a $VAR_LOGFILE
 fi
 NET_CHECK
