@@ -155,7 +155,7 @@ done
 current_month=$(date "+%b")
 limit_columns=$(( 2 - ${#space} ))
 weeks_in_month=$(( limit_columns + 1 ))
-printf "\e[m "
+printf "\e[m    "
 for week_n in $(seq 0 52); do
   month_week=$(date_offset "$week_n")
   if [[ "$current_month" != "$month_week" ]]; then
